@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+
+  backend:
+    container_name: enemy-server
+    build:
+      context: ./backend
+    ports:
+      - "5000:5000"
+    networks:
+      - game-network
+    restart: unless-stopped
+
+
+  frontend:
+    container_name: game-client
+    build:
+      context: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - game-network
+    restart: unless-stopped
+
+
+networks:
+  game-network:
+    driver: bridge
