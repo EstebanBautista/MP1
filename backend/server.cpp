@@ -1,18 +1,22 @@
-// PP Racing server - Fase 0 (design 2 base): single-threaded baseline.
+// PP Racing server - Diseño 2: hilo único de actualización.
 //
-// The whole simulation and the WebSocket event loop run on the same thread.
-// websocketpp drives everything from the asio io_service; the game tick is
-// scheduled with set_timer() and therefore never races with the connection
-// handlers. Later threading designs restructure only the way `World::update`
-// is executed.
+// Un solo hilo de ejecución (`simThread`) es el encargado de actualizar TODOS
+// los vehículos enemigos: el bucle de juego vive en ese hilo y, en cada tick,
+// ejecuta `World::update` (spawn + movimiento + eliminación + dificultad).
 //
-// Protocol (JSON over WebSocket):
-//   server -> client  {"type":"hello", "tickMs", "width", "height", "types"}
-//                     {"type":"state","tick","enemySpeed","msToRelease",
-//                      "evaded","slowmo","cars":[{id,type,x,y}, ...]}
-//   client -> server  {"type":"start"} | {"type":"restart"} | {"type":"game_over"}
-//                     {"type":"removeCar","id":N}
-//                     {"type":"slowmo","active":true|false}
+// La red (websocketpp / asio) corre en el hilo principal: los manejadores de
+// mensajes del cliente solo mutan el mundo bajo `simMutex`, y un `set_timer`
+// difunde cada estado desde una cola (outbox) para no tocar los sockets desde
+// el hilo de simulación.
+//
+// Datos compartidos y sincronización:
+//   - El `World` completo es compartido. Un solo `std::mutex` (simMutex)
+//     serializa toda la simulación y todo acceso de los manejadores de red;
+//     como hay un único hilo de actualización no hace falta más.
+//   - La cola `outbox` (con su propio mutex) entrega los snapshots JSON al
+//     hilo de red; nunca se envía desde un hilo que no sea el de asio.
+//
+// (Equivale al "Diseño 2: Hilo único de Actualización" del enunciado.)
 
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
@@ -21,9 +25,15 @@
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
 
+#include <chrono>
 #include <csignal>
 #include <functional>
+#include <mutex>
+#include <queue>
 #include <set>
+#include <string>
+#include <thread>
+#include <utility>
 
 #include "src/protocol.h"
 #include "src/world.h"
@@ -49,6 +59,11 @@ int main() {
     server.init_asio();
     server.set_reuse_addr(true);
 
+    // Shared state between the network thread and the simulation thread.
+    std::mutex simMutex;                 // guards `world`
+    std::mutex outMutex;                 // guards `outbox`
+    std::queue<std::string> outbox;      // state snapshots ready to broadcast
+
     // Active WebSocket connections (typically a single game client).
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> connections;
@@ -63,9 +78,11 @@ int main() {
         connections.erase(hdl);
     });
 
-    server.set_message_handler([&world](websocketpp::connection_hdl,
-                                        WsServer::message_ptr msg) {
+    // Client messages only touch the world through the simulation lock.
+    server.set_message_handler([&world, &simMutex](websocketpp::connection_hdl,
+                                                   WsServer::message_ptr msg) {
         ClientMessage cm = parseClientMessage(msg->get_payload());
+        std::lock_guard<std::mutex> lock(simMutex);
         switch (cm.action) {
             case ClientAction::Start:
             case ClientAction::Restart:
@@ -92,36 +109,67 @@ int main() {
     server.listen(5000);
     server.start_accept();
 
-    // Game loop: step the world and broadcast the resulting state. Runs on the
-    // asio event loop thread, so no locking is needed in this design.
-    std::function<void()> tickLoop;
-    tickLoop = [&]() {
-        world.update(World::TICK_MS);
-        std::string state = world.stateJson();
-        for (const auto &hdl : connections) {
-            try {
-                server.send(hdl, state, websocketpp::frame::opcode::text);
-            } catch (const websocketpp::exception &) {
-                // Connection vanished mid-broadcast; the close handler
-                // will drop it from the set.
+    // THE updater thread: the only thread that runs the simulation. It paces
+    // itself to ~30 ticks/s and leaves the snapshots for the network thread.
+    std::thread simThread([&world, &simMutex, &outMutex, &outbox]() {
+        auto nextWake = std::chrono::steady_clock::now();
+        while (g_running) {
+            std::string snapshot;
+            {
+                std::lock_guard<std::mutex> lock(simMutex);
+                world.update(World::TICK_MS);
+                snapshot = world.stateJson();
+            }
+            {
+                std::lock_guard<std::mutex> lock(outMutex);
+                outbox.push(std::move(snapshot));
+            }
+
+            nextWake += std::chrono::milliseconds(static_cast<long>(World::TICK_MS));
+            std::this_thread::sleep_until(nextWake);
+        }
+    });
+
+    // Broadcast dispatcher on the asio thread: drains one snapshot per timer
+    // callback and sends it to every connection.
+    std::function<void()> broadcastLoop;
+    broadcastLoop = [&]() {
+        std::string snapshot;
+        {
+            std::lock_guard<std::mutex> lock(outMutex);
+            if (!outbox.empty()) {
+                snapshot = std::move(outbox.front());
+                outbox.pop();
             }
         }
+
+        if (!snapshot.empty()) {
+            for (const auto &hdl : connections) {
+                try {
+                    server.send(hdl, snapshot, websocketpp::frame::opcode::text);
+                } catch (const websocketpp::exception &) {
+                    // Connection vanished mid-broadcast; the close handler
+                    // will drop it from the set.
+                }
+            }
+        }
+
         if (g_running) {
             server.set_timer(static_cast<long>(World::TICK_MS),
-                             [&tickLoop](websocketpp::lib::error_code const &ec) {
+                             [&broadcastLoop](websocketpp::lib::error_code const &ec) {
                                  if (!ec) {
-                                     tickLoop();
+                                     broadcastLoop();
                                  }
                              });
         }
     };
-
-    server.set_timer(1, [&tickLoop](websocketpp::lib::error_code const &ec) {
+    server.set_timer(1, [&broadcastLoop](websocketpp::lib::error_code const &ec) {
         if (!ec) {
-            tickLoop();
+            broadcastLoop();
         }
     });
 
     server.run();
+    simThread.join();
     return 0;
 }
