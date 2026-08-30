@@ -506,6 +506,9 @@ window.onload = function () {
     let msToReleaseEnemy = GameConfig.INITIAL_MS_TO_RELEASE;
     let lastServerState = null;  // latest `state` message from the backend
     let slowmoSentToServer = false;
+    let restartPending = false;  // discarding stale states after a restart
+    let lastSeenTick = 0;  // tick of the last accepted `state` message
+    let pendingDeletionIds = new Set();  // ids destroyed locally, awaiting server confirm
 
     // Visual effects variables
     let screenShake = 0;
@@ -528,7 +531,17 @@ window.onload = function () {
     // simulated on the server; the client renders them and sends gameplay
     // events back.
     GameWS.on('state', function (state) {
+      if (restartPending) {
+        // Ignore stale states from the previous game; accept the first one
+        // whose tick drops to or below the last tick of the previous session.
+        if (state.tick <= lastSeenTick) {
+          restartPending = false;
+          lastServerState = state;
+        }
+        return;
+      }
       lastServerState = state;
+      lastSeenTick = state.tick;
     });
     GameWS.connect();
 
@@ -556,6 +569,11 @@ window.onload = function () {
       const seen = new Set();
       state.cars.forEach(function (serverCar) {
         seen.add(serverCar.id);
+        // Cars we already destroyed locally (shield) must not be recreated
+        // while the backend still has them in flight.
+        if (pendingDeletionIds.has(serverCar.id)) {
+          return;
+        }
         const existing = enemyCarIndex.get(serverCar.id);
         if (existing !== undefined) {
           enemyCars[existing].car.applyState(serverCar.x, serverCar.y);
@@ -596,6 +614,13 @@ window.onload = function () {
           enemyCars.splice(i, 1);
         }
       }
+
+      // Forget the locally destroyed ids the server confirmed removing.
+      pendingDeletionIds.forEach(function (id) {
+        if (!seen.has(id)) {
+          pendingDeletionIds.delete(id);
+        }
+      });
       rebuildEnemyIndex();
     }
 
@@ -828,6 +853,9 @@ window.onload = function () {
 
       enemyCars = [];
       enemyCarIndex.clear();
+      lastSeenTick = lastServerState ? lastServerState.tick : 0;
+      restartPending = lastSeenTick > 0;
+      pendingDeletionIds.clear();
       lastServerState = null;
       slowmoSentToServer = false;
       score = 0;
@@ -1221,6 +1249,10 @@ window.onload = function () {
             if (enemyCenterY > playerCenterY + 60) {
               enemyCars[i].popupShown = true;
 
+              // Award the +1 point for evading this car.
+              score += 1;
+              scoreText.text = getScoreText(score);
+
               // Show +1 popup now
               const scorePopup = new PIXI.Text('+1', {
                 fontFamily: 'Arial',
@@ -1322,6 +1354,7 @@ window.onload = function () {
               // so it stops simulating it.
               app.stage.removeChild(car);
               GameWS.send({ type: 'removeCar', id: enemyCars[i].id });
+              pendingDeletionIds.add(enemyCars[i].id);
               enemyCars.splice(i, 1);
               i--;
 

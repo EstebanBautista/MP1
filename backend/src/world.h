@@ -23,6 +23,7 @@ struct World {
     static constexpr float WIDTH = 640.0f;
     static constexpr float HEIGHT = 840.0f;
     static constexpr float SPAWN_Y = -30.0f;        // spawn just above the road
+    static constexpr float SPAWN_SAFE_GAP = 100.0f; // min Y gap before a lane is reused
     static constexpr float REMOVAL_MARGIN = 80.0f;  // fully below the road
     static constexpr int TYPES = 5;                 // enemy1 .. enemy5
 
@@ -74,7 +75,6 @@ private:
     double tickRateMs;
     std::mt19937 rng;
     std::uniform_int_distribution<int> typeDist;
-    std::uniform_int_distribution<std::size_t> laneDist;
 
     void spawnCar();
     void onCarEvaded();
