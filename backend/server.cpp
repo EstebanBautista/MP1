@@ -1,18 +1,28 @@
-// PP Racing server - Fase 0 (design 2 base): single-threaded baseline.
+// PP Racing server - Diseño 3: hilo para cada tipo de vehículo.
 //
-// The whole simulation and the WebSocket event loop run on the same thread.
-// websocketpp drives everything from the asio io_service; the game tick is
-// scheduled with set_timer() and therefore never races with the connection
-// handlers. Later threading designs restructure only the way `World::update`
-// is executed.
+// El movimiento se reparte entre TYPES hilos: cada hilo de trabajo actualiza
+// TODOS los vehículos de un tipo (enemy1..enemy5). Los hilos corren en
+// paralelo durante la fase de movimiento de cada tick.
 //
-// Protocol (JSON over WebSocket):
-//   server -> client  {"type":"hello", "tickMs", "width", "height", "types"}
-//                     {"type":"state","tick","enemySpeed","msToRelease",
-//                      "evaded","slowmo","cars":[{id,type,x,y}, ...]}
-//   client -> server  {"type":"start"} | {"type":"restart"} | {"type":"game_over"}
-//                     {"type":"removeCar","id":N}
-//                     {"type":"slowmo","active":true|false}
+// Arquitectura:
+//   - Hilo controlador (`controllerThread`): marca el ritmo (~30 ticks/s),
+//     hace spawn, lanza a los TYPES trabajadores, espera que terminen
+//     (join), elimina los autos fuera de pantalla y vuelca la dificultad.
+//   - TYPES hilos de trabajo: cada iteración del tick escanea el vector de
+//     autos y mueve los que coinciden con su tipo.
+//   - Hilo de red (asio): websocketpp + difusión de estados desde la outbox.
+//
+// Sincronización y carreras:
+//   - El controlador mantiene `simMutex` durante TODO el tick (incluida la
+//     fase paralela). Los manejadores de mensajes del cliente también toman
+//     ese mutex, por lo que ningún hilo muta el vector durante el trabajo.
+//   - Cada auto es escrito por un solo hilo (el de su tipo) y leído por
+//     nadie más en esa fase => no hay condición de carrera sobre los autos.
+//   - La outbox (outboxMutex) entrega los snapshots JSON al hilo de red; los
+//     sockets solo se tocan desde el hilo de asio.
+//
+// (Equivale al "Diseño 3: Hilo para cada tipo de vehículo" del enunciado:
+//  rojos, verdes, negros, etc. cada uno con su propio hilo.)
 
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
@@ -21,9 +31,16 @@
 #include <websocketpp/config/asio_no_tls.hpp>
 #include <websocketpp/server.hpp>
 
+#include <chrono>
 #include <csignal>
 #include <functional>
+#include <mutex>
+#include <queue>
 #include <set>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #include "src/protocol.h"
 #include "src/world.h"
@@ -49,6 +66,11 @@ int main() {
     server.init_asio();
     server.set_reuse_addr(true);
 
+    // Shared state between the network thread and the simulation threads.
+    std::mutex simMutex;                 // guards `world`
+    std::mutex outMutex;                 // guards `outbox`
+    std::queue<std::string> outbox;      // state snapshots ready to broadcast
+
     // Active WebSocket connections (typically a single game client).
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> connections;
@@ -63,9 +85,11 @@ int main() {
         connections.erase(hdl);
     });
 
-    server.set_message_handler([&world](websocketpp::connection_hdl,
-                                        WsServer::message_ptr msg) {
+    // Client messages only touch the world through the simulation lock.
+    server.set_message_handler([&world, &simMutex](websocketpp::connection_hdl,
+                                                   WsServer::message_ptr msg) {
         ClientMessage cm = parseClientMessage(msg->get_payload());
+        std::lock_guard<std::mutex> lock(simMutex);
         switch (cm.action) {
             case ClientAction::Start:
             case ClientAction::Restart:
@@ -92,36 +116,92 @@ int main() {
     server.listen(5000);
     server.start_accept();
 
-    // Game loop: step the world and broadcast the resulting state. Runs on the
-    // asio event loop thread, so no locking is needed in this design.
-    std::function<void()> tickLoop;
-    tickLoop = [&]() {
-        world.update(World::TICK_MS);
-        std::string state = world.stateJson();
-        for (const auto &hdl : connections) {
-            try {
-                server.send(hdl, state, websocketpp::frame::opcode::text);
-            } catch (const websocketpp::exception &) {
-                // Connection vanished mid-broadcast; the close handler
-                // will drop it from the set.
+    // Controller thread: paces the tick and coordinates the type workers.
+    // It holds `simMutex` for the whole tick, so the cars vector is not
+    // resized while the workers hold indices / iterate it.
+    std::thread controllerThread([&world, &simMutex, &outMutex, &outbox]() {
+        auto nextWake = std::chrono::steady_clock::now();
+        const float dt = static_cast<float>(World::TICK_MS);
+
+        while (g_running) {
+            std::string snapshot;
+            {
+                std::lock_guard<std::mutex> lock(simMutex);
+                if (world.running) {
+                    world.beginTick(dt);
+                    const float mult = world.slowmoMultiplier();
+
+                    // One worker thread per car type. Each worker moves only
+                    // the cars of its own type, so no car is touched twice.
+                    std::vector<std::thread> typeWorkers;
+                    typeWorkers.reserve(static_cast<std::size_t>(World::TYPES));
+                    for (int t = 1; t <= World::TYPES; ++t) {
+                        typeWorkers.emplace_back([&world, t, mult]() {
+                            for (Car &c : world.cars) {
+                                if (c.type == t) {
+                                    world.moveCar(c, mult);
+                                }
+                            }
+                        });
+                    }
+                    for (std::thread &w : typeWorkers) {
+                        w.join();
+                    }
+
+                    world.endTick();
+                }
+                snapshot = world.stateJson();
+            }
+            {
+                std::lock_guard<std::mutex> lock(outMutex);
+                outbox.push(std::move(snapshot));
+            }
+
+            nextWake += std::chrono::milliseconds(static_cast<long>(World::TICK_MS));
+            std::this_thread::sleep_until(nextWake);
+        }
+    });
+
+    // Broadcast dispatcher on the asio thread: drains one snapshot per timer
+    // callback and sends it to every connection.
+    std::function<void()> broadcastLoop;
+    broadcastLoop = [&]() {
+        std::string snapshot;
+        {
+            std::lock_guard<std::mutex> lock(outMutex);
+            if (!outbox.empty()) {
+                snapshot = std::move(outbox.front());
+                outbox.pop();
             }
         }
+
+        if (!snapshot.empty()) {
+            for (const auto &hdl : connections) {
+                try {
+                    server.send(hdl, snapshot, websocketpp::frame::opcode::text);
+                } catch (const websocketpp::exception &) {
+                    // Connection vanished mid-broadcast; the close handler
+                    // will drop it from the set.
+                }
+            }
+        }
+
         if (g_running) {
             server.set_timer(static_cast<long>(World::TICK_MS),
-                             [&tickLoop](websocketpp::lib::error_code const &ec) {
+                             [&broadcastLoop](websocketpp::lib::error_code const &ec) {
                                  if (!ec) {
-                                     tickLoop();
+                                     broadcastLoop();
                                  }
                              });
         }
     };
-
-    server.set_timer(1, [&tickLoop](websocketpp::lib::error_code const &ec) {
+    server.set_timer(1, [&broadcastLoop](websocketpp::lib::error_code const &ec) {
         if (!ec) {
-            tickLoop();
+            broadcastLoop();
         }
     });
 
     server.run();
+    controllerThread.join();
     return 0;
 }
