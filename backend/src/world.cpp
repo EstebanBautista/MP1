@@ -23,8 +23,7 @@ World::World(double tickMs)
     : laneXs({160.0f, 224.0f, 288.0f, 352.0f, 416.0f, 480.0f})
     , tickRateMs(tickMs > 0.0 ? tickMs : TICK_MS)
     , rng(std::random_device{}())
-    , typeDist(1, TYPES)
-    , laneDist(0, laneXs.size() - 1) {}
+    , typeDist(1, TYPES) {}
 
 void World::startGame() {
     cars.clear();
@@ -57,10 +56,31 @@ void World::removeCar(std::uint64_t id) {
 }
 
 void World::spawnCar() {
+    // Only reuse a lane once its most recent occupant has cleared the spawn
+    // zone, so two cars never share the same spot. If every lane is still
+    // blocked, skip the spawn; the release timer retries on a later tick.
+    std::vector<std::size_t> freeLanes;
+    for (std::size_t li = 0; li < laneXs.size(); ++li) {
+        bool blocked = false;
+        for (const Car &c : cars) {
+            if (c.x == laneXs[li] && c.y < SPAWN_Y + SPAWN_SAFE_GAP) {
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked) {
+            freeLanes.push_back(li);
+        }
+    }
+    if (freeLanes.empty()) {
+        return;
+    }
+
     Car c;
     c.id = nextId++;
     c.type = typeDist(rng);
-    c.x = laneXs[laneDist(rng)];
+    std::uniform_int_distribution<std::size_t> pick(0, freeLanes.size() - 1);
+    c.x = laneXs[freeLanes[pick(rng)]];
     c.y = SPAWN_Y;
     c.speed = static_cast<float>(enemySpeed);
     c.active = true;
