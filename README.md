@@ -1,72 +1,36 @@
-# Enemy Cars Threading Project
+# MP1 — Enemy Cars: Diseño 1 — Hilos Independientes
 
-## Overview
+Esta rama implementa el **Diseño 1: Hilos Independientes** del MINIPROYECTO 1 de Programación Paralela (300CIP013, 2026-II).
 
-This is a micro project designed to teach parallel programming students how to use threads (std::thread or pthread) in a client-server architecture.
+> Para la arquitectura general del proyecto (común a los 4 diseños), el
+> análisis completo y la comparación entre diseños, ver el
+> [README de `main`](../../tree/main) y el informe.
 
-The objective is to implement a system where enemy cars are generated and their positions are updated asynchronously using threads. The backend server is responsible for generating movement data, while the frontend displays the enemy cars and applies the received positions.
+## Qué hace esta rama distinto
 
-The project focuses on the practical application of parallel programming concepts such as thread creation, task decomposition, synchronization, and communication between concurrent components.
+Cada vehículo enemigo tiene **su propio hilo de ejecución**, creado y
+destruido en cada tick del servidor (~30 veces por segundo). El hilo
+controlador crea un `std::thread` por cada auto activo, espera (`join`) a que
+todos terminen, y recién ahí continúa con la limpieza y la dificultad. Es el
+diseño con mayor overhead de creación de hilos de los 4 — pensado justamente
+para evidenciar ese costo. Ver el comentario de cabecera de `server.cpp` para
+el detalle de sincronización.
 
-By completing this project, students will learn how to:
-
-- Create and manage parallel execution using: C++ std::thread or POSIX pthread
-- Decompose a problem into independent tasks.
-- Design thread-based solutions for real-time simulations.
-- Manage shared data between threads.
-
-## Technologies
-
-Backend
-- C++
-- POSIX Threads (pthread) or C++ Threads (std::thread)
-- Socket Programming
-- Concurrent Programming Concepts
-
-Frontend
-- JavaScript
-- HTML5 Canvas / PixiJS
-
-Infrastructure
-- Docker
-- Docker Compose
-
-## Start the application
-
-Build and execute both services:
+## Cómo correr
 
 ```bash
+git checkout design-1
+docker compose down   # si venías de otra rama
 docker compose up --build
 ```
+Abrí `http://localhost:8080` — hard refresh (`Ctrl+Shift+R`) o modo incógnito
+si venías de probar otra rama.
 
-Services:
+## Archivos clave de este diseño
 
-Frontend:
-http://localhost:8080
-
-Backend:
-ws://localhost:5000
-
-## General Assignment Tasks
-
-Students must implement a parallel solution where enemy car movement is handled by threads.
-
-The solution must:
-
-- Create worker threads.
-- Assign movement tasks to threads.
-- Update enemy positions concurrently.
-- Send updated states to the frontend.
-
-More details in course assignment
-
-## Submision
-
-- Students must create a personal fork of the project repository.
-- Send PDF report with
-    - A short description of your implementation.
-    - The threading approach used.
-    - Any synchronization mechanisms implemented.
-    - Testing results.
-
-This project connects theoretical concepts from parallel programming with a practical simulation environment.
+- `backend/server.cpp` — lógica de threading de este diseño específico (un
+  hilo por vehículo)
+- `backend/src/world.cpp` / `world.h` — estado del juego (compartido con las
+  otras ramas)
+- `backend/src/protocol.cpp` / `protocol.h` — parseo de mensajes del cliente
+  (compartido con las otras ramas)

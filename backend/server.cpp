@@ -1,30 +1,4 @@
 // PP Racing server - Diseño 1: hilos independientes (un hilo por vehículo).
-//
-// Cada vehículo enemigo tiene SU propio hilo de ejecución: en cada tick el
-// controlador lanza un std::thread por carro, cada uno responsable de
-// actualizar únicamente ese vehículo, y espera (join) a que todos terminen
-// antes de continuar con la eliminación y la dificultad.
-//
-// Arquitectura:
-//   - Hilo controlador (`controllerThread`): marca el ritmo (~30 ticks/s),
-//     hace spawn, crea N hilos (uno por auto), espera que terminen, elimina
-//     los autos fuera de pantalla y vuelca la dificultad.
-//   - Un hilo de trabajo POR vehículo: nace y muere en cada tick. Con miles
-//     de vehículos esto genera miles de hilos por segundo (el objetivo del
-//     diseño es evidenciar dicho costo).
-//   - Hilo de red (asio): websocketpp + difusión de estados desde la outbox.
-//
-// Sincronización y carreras:
-//   - El controlador mantiene `simMutex` durante TODO el tick (incluida la
-//     fase paralela); los manejadores de mensajes del cliente también toman
-//     ese mutex, así que el vector no se modifica mientras hay hilos activos.
-//   - Cada hilo escribe únicamente su carro (índice fijo): no hay dos hilos
-//     escribiendo el mismo auto => sin condición de carrera sobre los autos.
-//   - La outbox (outboxMutex) entrega los snapshots JSON al hilo de red; los
-//     sockets solo se tocan desde el hilo de asio.
-//
-// (Equivale al "Diseño 1: Hilos Independientes" del enunciado:
-//  Carro 1 -> Thread 1, Carro 2 -> Thread 2, ... )
 
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
@@ -70,12 +44,10 @@ int main() {
     server.init_asio();
     server.set_reuse_addr(true);
 
-    // Shared state between the network thread and the simulation threads.
-    std::mutex simMutex;                 // guards `world`
-    std::mutex outMutex;                 // guards `outbox`
-    std::queue<std::string> outbox;      // state snapshots ready to broadcast
+    std::mutex simMutex;                 
+    std::mutex outMutex;                
+    std::queue<std::string> outbox;      
 
-    // Active WebSocket connections (typically a single game client).
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> connections;
 
@@ -89,7 +61,6 @@ int main() {
         connections.erase(hdl);
     });
 
-    // Client messages only touch the world through the simulation lock.
     server.set_message_handler([&world, &simMutex](websocketpp::connection_hdl,
                                                    WsServer::message_ptr msg) {
         ClientMessage cm = parseClientMessage(msg->get_payload());
@@ -120,9 +91,7 @@ int main() {
     server.listen(5000);
     server.start_accept();
 
-    // Controller thread: paces the tick and creates one thread per car.
-    // The simulation lock is held for the whole tick, so the cars vector is
-    // never resized while the per-car threads are running.
+
     std::thread controllerThread([&world, &simMutex, &outMutex, &outbox]() {
         auto nextWake = std::chrono::steady_clock::now();
         const float dt = static_cast<float>(World::TICK_MS);
@@ -135,10 +104,7 @@ int main() {
                     world.beginTick(dt);
                     const float mult = world.slowmoMultiplier();
 
-                    // One independent thread per enemy car. Each thread owns
-                    // exactly one `Car` (index captured by value). Threads are
-                    // joined before the cull phase: born and destroyed every
-                    // tick, O(cars) threads per second at 30 Hz.
+
                     std::vector<std::thread> carThreads;
                     carThreads.reserve(world.cars.size());
                     for (std::size_t i = 0; i < world.cars.size(); ++i) {
@@ -164,8 +130,7 @@ int main() {
         }
     });
 
-    // Broadcast dispatcher on the asio thread: drains one snapshot per timer
-    // callback and sends it to every connection.
+
     std::function<void()> broadcastLoop;
     broadcastLoop = [&]() {
         std::string snapshot;
@@ -182,8 +147,7 @@ int main() {
                 try {
                     server.send(hdl, snapshot, websocketpp::frame::opcode::text);
                 } catch (const websocketpp::exception &) {
-                    // Connection vanished mid-broadcast; the close handler
-                    // will drop it from the set.
+
                 }
             }
         }
