@@ -89,6 +89,17 @@ void World::update(double dtMs) {
         return;
     }
 
+    beginTick(dtMs);
+
+    const float mult = slowmoMultiplier();
+    for (Car &c : cars) {
+        moveCar(c, mult);
+    }
+
+    endTick();
+}
+
+void World::beginTick(double dtMs) {
     ++tick;
     elapsedMs += dtMs;
 
@@ -97,32 +108,38 @@ void World::update(double dtMs) {
         spawnCar();
         nextSpawnMs = elapsedMs + static_cast<double>(msToRelease);
     }
+}
 
-    // Move every car and mark the ones that left the screen.
-    const float mult = slowmoActive ? static_cast<float>(SLOWMO_MULTIPLIER) : 1.0f;
+void World::moveCar(Car &c, float mult) {
+    c.y += c.speed * mult;
+    if (c.y > HEIGHT + REMOVAL_MARGIN) {
+        c.active = false;
+    }
+}
+
+void World::endTick() {
+    // Count the cars that left the screen and cull them in a single pass.
     std::uint64_t removedCount = 0;
-    for (Car &c : cars) {
-        c.y += c.speed * mult;
-        if (c.y > HEIGHT + REMOVAL_MARGIN) {
-            c.active = false;
+    for (const Car &c : cars) {
+        if (!c.active) {
             ++removedCount;
         }
     }
+    if (removedCount == 0) {
+        return;
+    }
 
-    // Cull inactive cars in a single pass.
-    if (removedCount > 0) {
-        std::vector<Car> keep;
-        keep.reserve(cars.size() - static_cast<std::size_t>(removedCount));
-        for (const Car &c : cars) {
-            if (c.active) {
-                keep.push_back(c);
-            }
+    std::vector<Car> keep;
+    keep.reserve(cars.size() - static_cast<std::size_t>(removedCount));
+    for (const Car &c : cars) {
+        if (c.active) {
+            keep.push_back(c);
         }
-        cars.swap(keep);
+    }
+    cars.swap(keep);
 
-        for (std::uint64_t i = 0; i < removedCount; ++i) {
-            onCarEvaded();
-        }
+    for (std::uint64_t i = 0; i < removedCount; ++i) {
+        onCarEvaded();
     }
 }
 
