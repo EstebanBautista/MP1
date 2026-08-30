@@ -53,22 +53,22 @@ class Car {
 
 /**
  * Enemy Car class
- * The sprite is driven entirely by positions received from the backend over
- * WebSocket; the frontend never computes enemy movement locally anymore.
+ * Randomly selects a sprite and spawns at specified lane positions
  */
 class EnemyCar extends Car {
-  constructor(app, type, boundLeft, boundRight, boundBottom, speed) {
-    // type is 1..5 and selects the matching enemy texture
-    const texture = app.loader.resources[`enemy${type}`].texture;
+  constructor(app, boundLeft, boundRight, boundBottom, speed) {
+    // Get a random enemy sprite
+    const texture = app.loader.resources[`enemy${randomBetween(1, 5)}`].texture;
     super(app, texture, boundLeft, boundRight, boundBottom, speed);
-    this.type = type;
   }
 
-  /**
-   * Apply the authoritative position sent by the server.
-   */
-  applyState(x, y) {
-    this.setPosition(x, y);
+  invoke(lanesQ, lanesPosition) {
+    // const whichLane = randomBetween(1, lanesQ);  // Randomly select a lane
+    // const laneToPushEnemy = lanesPosition[whichLane - 1]; // Get the position of the selected lane
+    // this.setPosition(laneToPushEnemy.x, -this.sprite.height);
+
+    this.setPosition(290, -30); // Set a fixed position for testing purposes
+    
   }
 }
 

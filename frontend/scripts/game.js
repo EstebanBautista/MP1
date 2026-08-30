@@ -498,14 +498,12 @@ window.onload = function () {
     let gameStarted = false;
     let lost = false;
     let enemyCars = [];
-    let enemyCarIndex = new Map();   // enemy id -> index in enemyCars
     let startTime = Date.now();
     let score = 0;  // Total score (points)
     let carsEvadedCount = 0;  // Actual number of cars evaded (for difficulty)
     let enemySpeed = GameConfig.INITIAL_ENEMY_SPEED;
     let msToReleaseEnemy = GameConfig.INITIAL_MS_TO_RELEASE;
-    let lastServerState = null;  // latest `state` message from the backend
-    let slowmoSentToServer = false;
+    let difficultyIncrease = false;
 
     // Visual effects variables
     let screenShake = 0;
@@ -522,115 +520,6 @@ window.onload = function () {
     let slowmoTransitioning = false;
     let slowmoTransitionStartTime = 0;
     const SLOWMO_TRANSITION_DURATION = 1000; // 1 second transition
-
-    // ---- WebSocket wiring -------------------------------------------------
-    // The backend is the authority: enemy positions, spawns and difficulty are
-    // simulated on the server; the client renders them and sends gameplay
-    // events back.
-    GameWS.on('state', function (state) {
-      lastServerState = state;
-    });
-    GameWS.connect();
-
-    // Rebuild the id -> index map after any enemy list mutation.
-    function rebuildEnemyIndex() {
-      enemyCarIndex.clear();
-      enemyCars.forEach(function (item, index) {
-        enemyCarIndex.set(item.id, index);
-      });
-    }
-
-    // Apply the authoritative state: create new sprites, move existing ones
-    // and drop the ones the server removed.
-    function applyServerState(state) {
-      if (state.enemySpeed !== enemySpeed) {
-        enemySpeed = state.enemySpeed;
-        enemySpeedText.text = getEnemySpeedText(enemySpeed);
-      }
-      if (state.msToRelease !== msToReleaseEnemy) {
-        msToReleaseEnemy = state.msToRelease;
-        msToReleaseText.text = getMsToReleaseText(msToReleaseEnemy);
-      }
-      carsEvadedCount = state.evaded;
-
-      const seen = new Set();
-      state.cars.forEach(function (serverCar) {
-        seen.add(serverCar.id);
-        const existing = enemyCarIndex.get(serverCar.id);
-        if (existing !== undefined) {
-          enemyCars[existing].car.applyState(serverCar.x, serverCar.y);
-        } else {
-          const enemyCar = new EnemyCar(
-            app,
-            serverCar.type,
-            scenario.xRoadStart,
-            scenario.xRoadEnd,
-            windowHeight,
-            GameConfig.GAME_SPEED
-          );
-          enemyCar.applyState(serverCar.x, serverCar.y);
-
-          const item = {
-            car: enemyCar,
-            sprite: enemyCar.sprite,
-            id: serverCar.id,
-            nearMissTriggered: false,
-            pointsAwarded: false,
-            popupShown: false,
-          };
-
-          enemyCarIndex.set(serverCar.id, enemyCars.length);
-          enemyCars.push(item);
-          app.stage.addChild(item.sprite);
-
-          // A new enemy arrived: roll for power-ups (same behaviour as when
-          // the game spawned enemies locally).
-          spawnPowerUpIfEligible();
-        }
-      });
-
-      // Remove sprites whose car no longer exists on the server.
-      for (let i = enemyCars.length - 1; i >= 0; i--) {
-        if (!seen.has(enemyCars[i].id)) {
-          app.stage.removeChild(enemyCars[i].sprite);
-          enemyCars.splice(i, 1);
-        }
-      }
-      rebuildEnemyIndex();
-    }
-
-    // Roll shield / slow-motion pickups when an enemy spawns.
-    function spawnPowerUpIfEligible() {
-      const anyPowerUpActive = shieldActive || slowmoActive || slowmoTransitioning;
-
-      if (carsEvadedCount >= GameConfig.POWERUP_START_THRESHOLD && !anyPowerUpActive) {
-        // Spawn shield (only if position is clear of enemies)
-        if (Math.random() < GameConfig.SHIELD_SPAWN_CHANCE) {
-          const randomLane = randomBetween(0, (scenario.lanes * 2) - 1);
-          const shieldX = scenario.lanesPos[randomLane].x;
-          const shieldY = -50;
-
-          if (isPositionClearOfEnemies(shieldX, shieldY)) {
-            const shield = createShield(shieldX, shieldY);
-            shields.push(shield);
-            app.stage.addChild(shield);
-          }
-        }
-
-        // Spawn slow-mo (only if position is clear of enemies)
-        if (Math.random() < GameConfig.SLOWMO_SPAWN_CHANCE) {
-          const randomLane = randomBetween(0, (scenario.lanes * 2) - 1);
-          const slowmoX = scenario.lanesPos[randomLane].x;
-          const slowmoY = -50;
-
-          if (isPositionClearOfEnemies(slowmoX, slowmoY)) {
-            const slowmo = createSlowmo(slowmoX, slowmoY);
-            slowmos.push(slowmo);
-            app.stage.addChild(slowmo);
-          }
-        }
-      }
-    }
 
     // Speed lines container
     const speedLinesContainer = new PIXI.Container();
@@ -732,9 +621,6 @@ window.onload = function () {
         startTime = Date.now();
         window.removeEventListener('keydown', startGameHandler);
 
-        // Tell the backend to start the simulation.
-        GameWS.send({ type: 'start' });
-
         // Start background music
         audioManager.startBackgroundMusic();
       }
@@ -747,9 +633,6 @@ window.onload = function () {
         startScreenContainer.visible = false;
         startTime = Date.now();
         app.view.removeEventListener('touchstart', touchStartGameHandler);
-
-        // Tell the backend to start the simulation.
-        GameWS.send({ type: 'start' });
 
         // Start background music
         audioManager.startBackgroundMusic();
@@ -827,13 +710,11 @@ window.onload = function () {
       app.stage.position.y = 0;
 
       enemyCars = [];
-      enemyCarIndex.clear();
-      lastServerState = null;
-      slowmoSentToServer = false;
       score = 0;
       carsEvadedCount = 0;
       enemySpeed = GameConfig.INITIAL_ENEMY_SPEED;
       msToReleaseEnemy = GameConfig.INITIAL_MS_TO_RELEASE;
+      difficultyIncrease = false;
       startTime = Date.now();
 
       playerCar.setPosition(windowWidth / 2, windowHeight / 2);
@@ -848,9 +729,6 @@ window.onload = function () {
       gameStarted = true;
       gameOverContainer.visible = false;
       startScreenContainer.visible = false;
-
-      // Tell the backend to reset the simulation.
-      GameWS.send({ type: 'restart' });
 
       // Restart background music
       audioManager.startBackgroundMusic();
@@ -1007,9 +885,6 @@ window.onload = function () {
           slowmoTransitioning = false;
           slowmoOverlay.visible = false;
           slowmoOverlay.alpha = 0.15; // Reset alpha for next time
-
-          // Tell the backend to restore the normal enemy speed.
-          GameWS.send({ type: 'slowmo', active: false });
         }
       }
 
@@ -1024,12 +899,84 @@ window.onload = function () {
 
       // If the game has started and player hasn't lost
       if (gameStarted && !lost) {
+        const now = Date.now();
+
         scenario.animate();
 
-        // Enemy spawns, movement, removal and difficulty now happen on the
-        // backend; the client only renders the authoritative positions.
-        if (lastServerState) {
-          applyServerState(lastServerState);
+        // Check if is time to add an enemy car to the game and increase difficulty
+        if ((now - startTime) >= msToReleaseEnemy) {
+          startTime = now;
+
+          const enemyCar = new EnemyCar(
+            app,
+            scenario.xRoadStart,
+            scenario.xRoadEnd,
+            windowHeight,
+            GameConfig.GAME_SPEED
+          );
+
+          enemyCar.invoke((scenario.lanes * 2), scenario.lanesPos);
+
+          // Track near miss status and scoring
+          enemyCar.nearMissTriggered = false;
+          enemyCar.pointsAwarded = false;
+          enemyCar.popupShown = false;
+
+          // Add Enemy Car
+          enemyCars.push(enemyCar);
+
+          // Add to the stage
+          app.stage.addChild(enemyCars[enemyCars.length - 1].sprite);
+
+          // Chance to spawn power-ups (only if player has evaded enough cars and NO power-up is active)
+          const anyPowerUpActive = shieldActive || slowmoActive || slowmoTransitioning;
+
+          if (carsEvadedCount >= GameConfig.POWERUP_START_THRESHOLD && !anyPowerUpActive) {
+            // Spawn shield (only if position is clear of enemies)
+            if (Math.random() < GameConfig.SHIELD_SPAWN_CHANCE) {
+              const randomLane = randomBetween(0, (scenario.lanes * 2) - 1);
+              const shieldX = scenario.lanesPos[randomLane].x;
+              const shieldY = -50;
+
+              // Only spawn if position is clear of enemy cars
+              if (isPositionClearOfEnemies(shieldX, shieldY)) {
+                const shield = createShield(shieldX, shieldY);
+                shields.push(shield);
+                app.stage.addChild(shield);
+              }
+            }
+
+            // Spawn slow-mo (only if position is clear of enemies)
+            if (Math.random() < GameConfig.SLOWMO_SPAWN_CHANCE) {
+              const randomLane = randomBetween(0, (scenario.lanes * 2) - 1);
+              const slowmoX = scenario.lanesPos[randomLane].x;
+              const slowmoY = -50;
+
+              // Only spawn if position is clear of enemy cars
+              if (isPositionClearOfEnemies(slowmoX, slowmoY)) {
+                const slowmo = createSlowmo(slowmoX, slowmoY);
+                slowmos.push(slowmo);
+                app.stage.addChild(slowmo);
+              }
+            }
+          }
+        }
+
+        // Check if need to increase difficulty based on actual cars evaded
+        if (carsEvadedCount !== 0 && !difficultyIncrease) {
+          difficultyIncrease = true;
+
+          if (carsEvadedCount % GameConfig.SPEED_INCREASE_INTERVAL === 0 &&
+              enemySpeed < GameConfig.MAX_ENEMY_SPEED) {
+            enemySpeed = enemySpeed + 1;
+            enemySpeedText.text = getEnemySpeedText(enemySpeed);
+          }
+
+          if (carsEvadedCount % GameConfig.SPAWN_RATE_INCREASE_INTERVAL === 0 &&
+              msToReleaseEnemy > GameConfig.MAX_ENEMY_MS_TO_RELEASE) {
+            msToReleaseEnemy = msToReleaseEnemy - GameConfig.SPAWN_RATE_DECREASE;
+            msToReleaseText.text = getMsToReleaseText(msToReleaseEnemy);
+          }
         }
 
         // Handle player input
@@ -1085,9 +1032,6 @@ window.onload = function () {
             slowmoTransitioning = false; // Cancel transition if it was transitioning
             slowmoOverlay.visible = true;
             slowmoOverlay.alpha = 0.15; // Reset alpha if it was fading
-
-            // Tell the backend to halve the enemy speed from now on.
-            GameWS.send({ type: 'slowmo', active: true });
 
             // Play power-up collection sound
             audioManager.playPowerUp();
@@ -1202,49 +1146,71 @@ window.onload = function () {
           }
         }
 
-        // Check collisions, near-miss and "passed player" popups against the
-        // authoritative positions received from the server. Enemy movement and
-        // off-screen removal happen on the backend; this client only reacts
-        // to the rendered positions (reconciliation drops vanished cars).
+        // Move enemy cars and check for collisions
         for (let i = 0; i < enemyCars.length; i++) {
           const playerBounds = playerCar.sprite.getBounds();
           const car = enemyCars[i].sprite;
 
-          const enemyBounds = car.getBounds();
+          let enemyBounds = car.getBounds();
 
-          // Check if car passed below player - show popup immediately
-          if (!enemyCars[i].popupShown && !enemyCars[i].pointsAwarded) {
-            const playerCenterY = playerBounds.y + (playerBounds.height / 2);
-            const enemyCenterY = enemyBounds.y + (enemyBounds.height / 2);
+          // Calculate current enemy speed (apply slow-mo if active or transitioning)
+          let currentEnemySpeed = enemySpeed;
 
-            // Car has passed below player (with margin to ensure it's clearly past)
-            if (enemyCenterY > playerCenterY + 60) {
-              enemyCars[i].popupShown = true;
+          if (slowmoActive) {
+            // Full slow-mo effect
+            currentEnemySpeed = enemySpeed * GameConfig.SLOWMO_MULTIPLIER;
+          } else if (slowmoTransitioning) {
+            // Gradual transition from slow to normal
+            const transitionElapsed = Date.now() - slowmoTransitionStartTime;
+            const transitionProgress = Math.min(transitionElapsed / SLOWMO_TRANSITION_DURATION, 1.0);
 
-              // Show +1 popup now
-              const scorePopup = new PIXI.Text('+1', {
-                fontFamily: 'Arial',
-                fontSize: 20,
-                fill: 0xffea00,
-                align: 'center',
-                stroke: 'yellow',
-                strokeThickness: 2,
-                fontWeight: 'bold'
-              });
-              scorePopup.x = playerCar.sprite.x;
-              scorePopup.y = playerCar.sprite.y - 40;
-              scorePopup.anchor.set(0.5);
-              scorePopup.zIndex = 150;
-              app.stage.addChild(scorePopup);
-              scorePopups.push(scorePopup);
+            // Interpolate from SLOWMO_MULTIPLIER (0.5) to 1.0
+            const currentMultiplier = GameConfig.SLOWMO_MULTIPLIER +
+              (1.0 - GameConfig.SLOWMO_MULTIPLIER) * transitionProgress;
 
-              // Play score increase sound
-              audioManager.playScore();
-            }
+            currentEnemySpeed = enemySpeed * currentMultiplier;
           }
 
-          // Near miss detection
-          if (!enemyCars[i].nearMissTriggered) {
+          // Move car if still in visible area, otherwise remove it
+          if ((enemyBounds.y - car.height) < windowHeight) {
+            car.y += currentEnemySpeed;
+
+            // Refresh bounds after movement
+            enemyBounds = car.getBounds();
+
+            // Check if car passed below player - show popup immediately
+            if (!enemyCars[i].popupShown && !enemyCars[i].pointsAwarded) {
+              const playerCenterY = playerBounds.y + (playerBounds.height / 2);
+              const enemyCenterY = enemyBounds.y + (enemyBounds.height / 2);
+
+              // Car has passed below player (with margin to ensure it's clearly past)
+              if (enemyCenterY > playerCenterY + 60) {
+                enemyCars[i].popupShown = true;
+
+                // Show +1 popup now
+                const scorePopup = new PIXI.Text('+1', {
+                  fontFamily: 'Arial',
+                  fontSize: 20,
+                  fill: 0xffea00,
+                  align: 'center',
+                  stroke: 'yellow',
+                  strokeThickness: 2,
+                  fontWeight: 'bold'
+                });
+                scorePopup.x = playerCar.sprite.x;
+                scorePopup.y = playerCar.sprite.y - 40;
+                scorePopup.anchor.set(0.5);
+                scorePopup.zIndex = 150;
+                app.stage.addChild(scorePopup);
+                scorePopups.push(scorePopup);
+
+                // Play score increase sound
+                audioManager.playScore();
+              }
+            }
+
+            // Near miss detection
+            if (!enemyCars[i].nearMissTriggered) {
             const playerCenterX = playerBounds.x + (playerBounds.width / 2);
             const playerCenterY = playerBounds.y + (playerBounds.height / 2);
             const enemyCenterX = enemyBounds.x + (enemyBounds.width / 2);
@@ -1318,10 +1284,8 @@ window.onload = function () {
           ) {
             // Check if shield is active
             if (shieldActive) {
-              // Shield protects - remove the car locally AND tell the backend
-              // so it stops simulating it.
+              // Shield protects - just remove the enemy car
               app.stage.removeChild(car);
-              GameWS.send({ type: 'removeCar', id: enemyCars[i].id });
               enemyCars.splice(i, 1);
               i--;
 
@@ -1349,9 +1313,6 @@ window.onload = function () {
               playerCar.explode();
               lost = true;
 
-              // Freeze the simulation on the backend.
-              GameWS.send({ type: 'game_over' });
-
               // Trigger screen shake effect
               screenShake = 15;
 
@@ -1369,8 +1330,48 @@ window.onload = function () {
               }
             }
           }
+        } else {
+          // Car is off screen - remove it
+          app.stage.removeChild(car);
+
+          // Increment car evaded count for difficulty (always, regardless of near miss)
+          carsEvadedCount++;
+          difficultyIncrease = false;
+
+          // Only award points if this car didn't already give near miss bonus
+          if (!enemyCars[i].pointsAwarded) {
+            // Increase score for evaded car
+            score += 1;
+            scoreText.text = getScoreText(score);
+
+            // Only show popup if it wasn't already shown when car passed player
+            if (!enemyCars[i].popupShown) {
+              // Play score increase sound
+              audioManager.playScore();
+
+              // Create score popup animation
+              const scorePopup = new PIXI.Text('+1', {
+                fontFamily: 'Arial',
+                fontSize: 28,
+                fill: 0x00FF00,
+                align: 'center',
+                stroke: 'black',
+                strokeThickness: 4,
+                fontWeight: 'bold'
+              });
+              scorePopup.x = playerCar.sprite.x;
+              scorePopup.y = playerCar.sprite.y - 40;
+              scorePopup.anchor.set(0.5);
+              scorePopup.zIndex = 150;
+              app.stage.addChild(scorePopup);
+              scorePopups.push(scorePopup);
+            }
+          }
+
+          enemyCars.splice(i, 1);
+          i = i - 1;
         }
-        rebuildEnemyIndex();
+      }
     }
 
     // Show game over screen when player has lost
