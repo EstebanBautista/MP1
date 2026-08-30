@@ -1,28 +1,5 @@
 // PP Racing server - Diseño 3: hilo para cada tipo de vehículo.
-//
-// El movimiento se reparte entre TYPES hilos: cada hilo de trabajo actualiza
-// TODOS los vehículos de un tipo (enemy1..enemy5). Los hilos corren en
-// paralelo durante la fase de movimiento de cada tick.
-//
-// Arquitectura:
-//   - Hilo controlador (`controllerThread`): marca el ritmo (~30 ticks/s),
-//     hace spawn, lanza a los TYPES trabajadores, espera que terminen
-//     (join), elimina los autos fuera de pantalla y vuelca la dificultad.
-//   - TYPES hilos de trabajo: cada iteración del tick escanea el vector de
-//     autos y mueve los que coinciden con su tipo.
-//   - Hilo de red (asio): websocketpp + difusión de estados desde la outbox.
-//
-// Sincronización y carreras:
-//   - El controlador mantiene `simMutex` durante TODO el tick (incluida la
-//     fase paralela). Los manejadores de mensajes del cliente también toman
-//     ese mutex, por lo que ningún hilo muta el vector durante el trabajo.
-//   - Cada auto es escrito por un solo hilo (el de su tipo) y leído por
-//     nadie más en esa fase => no hay condición de carrera sobre los autos.
-//   - La outbox (outboxMutex) entrega los snapshots JSON al hilo de red; los
-//     sockets solo se tocan desde el hilo de asio.
-//
-// (Equivale al "Diseño 3: Hilo para cada tipo de vehículo" del enunciado:
-//  rojos, verdes, negros, etc. cada uno con su propio hilo.)
+
 
 #ifndef ASIO_STANDALONE
 #define ASIO_STANDALONE
@@ -66,12 +43,10 @@ int main() {
     server.init_asio();
     server.set_reuse_addr(true);
 
-    // Shared state between the network thread and the simulation threads.
-    std::mutex simMutex;                 // guards `world`
-    std::mutex outMutex;                 // guards `outbox`
-    std::queue<std::string> outbox;      // state snapshots ready to broadcast
+    std::mutex simMutex;                 
+    std::mutex outMutex;                 
+    std::queue<std::string> outbox;      
 
-    // Active WebSocket connections (typically a single game client).
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> connections;
 
@@ -85,7 +60,6 @@ int main() {
         connections.erase(hdl);
     });
 
-    // Client messages only touch the world through the simulation lock.
     server.set_message_handler([&world, &simMutex](websocketpp::connection_hdl,
                                                    WsServer::message_ptr msg) {
         ClientMessage cm = parseClientMessage(msg->get_payload());
@@ -116,9 +90,7 @@ int main() {
     server.listen(5000);
     server.start_accept();
 
-    // Controller thread: paces the tick and coordinates the type workers.
-    // It holds `simMutex` for the whole tick, so the cars vector is not
-    // resized while the workers hold indices / iterate it.
+    
     std::thread controllerThread([&world, &simMutex, &outMutex, &outbox]() {
         auto nextWake = std::chrono::steady_clock::now();
         const float dt = static_cast<float>(World::TICK_MS);
@@ -131,8 +103,7 @@ int main() {
                     world.beginTick(dt);
                     const float mult = world.slowmoMultiplier();
 
-                    // One worker thread per car type. Each worker moves only
-                    // the cars of its own type, so no car is touched twice.
+                    
                     std::vector<std::thread> typeWorkers;
                     typeWorkers.reserve(static_cast<std::size_t>(World::TYPES));
                     for (int t = 1; t <= World::TYPES; ++t) {
@@ -162,8 +133,7 @@ int main() {
         }
     });
 
-    // Broadcast dispatcher on the asio thread: drains one snapshot per timer
-    // callback and sends it to every connection.
+    
     std::function<void()> broadcastLoop;
     broadcastLoop = [&]() {
         std::string snapshot;
@@ -180,8 +150,7 @@ int main() {
                 try {
                     server.send(hdl, snapshot, websocketpp::frame::opcode::text);
                 } catch (const websocketpp::exception &) {
-                    // Connection vanished mid-broadcast; the close handler
-                    // will drop it from the set.
+                   
                 }
             }
         }
