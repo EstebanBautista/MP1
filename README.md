@@ -12,30 +12,30 @@ servidor le manda.
 
 ## Cómo está organizado este repositorio
 
-Este repo NO tiene toda la implementación en `main`. Cada uno de los 4 diseños
+Este repositorio NO tiene toda la implementación en `main`. Cada uno de los 4 diseños
 de concurrencia vive en su **propia rama**, completa y ejecutable de forma
 independiente:
 
-| Rama | Diseño | Resumen |
+| Rama&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Diseño | Resumen |
 |---|---|---|
-| [`main`](../../tree/main) | — | Scaffold original del profesor, sin implementar. No es evaluable, solo el punto de partida. |
+| [`main`](../../tree/main) | — | — |
 | [`design-1`](../../tree/design-1) | Hilos Independientes | Un `std::thread` por cada vehículo, creado y destruido en cada tick. |
 | [`design-2`](../../tree/design-2) | Hilo Único de Actualización | Un solo hilo mueve todos los vehículos, secuencialmente. |
 | [`design-3`](../../tree/design-3) | Hilo por Tipo de Vehículo | Un hilo fijo por cada uno de los 5 tipos/colores de auto. |
 | [`design-4`](../../tree/design-4) | Pool de Hilos + Cola de Tareas | Grupo fijo de workers que toman tareas de una cola compartida (productor-consumidor). **Única rama sin WebSocket** — usa HTTP polling. |
 
-**Si estás evaluando este proyecto, andá directo a la rama del diseño que te
-interese** (`design-1`, `design-2`, `design-3` o `design-4`) — cada una es un
-proyecto autocontenido, no hace falta combinar nada de otra rama.
-
 ---
 
 ## Cómo correr cualquiera de los diseños
 
-1. Cloná el repo y pará en la rama que quieras probar:
+1. Cloná el repositorio y pará en la rama que quieras probar:
 ```bash
    git clone https://github.com/EstebanBautista/MP1.git
+```
+```bash
    cd MP1
+```
+```bash
    git checkout design-2   # o design-1 / design-3 / design-4
 ```
 
@@ -51,10 +51,10 @@ proyecto autocontenido, no hace falta combinar nada de otra rama.
    http://localhost:8080
 ```
 
-4. **Importante**: si venías de probar otra rama, hacé un **hard refresh**
-   (`Ctrl+Shift+R`) o abrí en **modo incógnito** — el navegador cachea los
-   archivos `.js` y puede mostrarte comportamiento de la rama anterior si no
-   lo forzás a recargar todo de cero.
+4. **Importante**: si viene de probar otra rama, haga un **hard refresh**
+   (`Ctrl+Shift+R`) o abra en **modo incógnito** — el navegador cachea los
+   archivos `.js` y puede mostrarle comportamiento de la rama anterior si no
+   lo fuerza a recargar todo de cero.
 
 ### Si vas a cambiar de rama para probar otro diseño
 
