@@ -11,7 +11,8 @@
 //     termine, elimina los autos fuera de pantalla y vuelca la dificultad.
 //   - Pool fijo de K hilos (K = nº de núcleos, acotado): duermen en la cola
 //     esperando trabajo y consumen tareas conforme llegan.
-//   - Hilo de red (asio): websocketpp + difusión de estados desde la outbox.
+//   - Hilo principal (main): bucle de aceptación HTTP ligero sobre ASIO
+//     standalone (en vez de websocketpp en los otros diseños).
 //
 // Sincronización y carreras:
 //   - `taskMutex` + `taskCv` protegen la cola de tareas (productor-consumidor
@@ -20,8 +21,29 @@
 //   - Cada tarea lleva {índice, multiplicador}; un solo trabajador ejecuta
 //     cada tarea y escribe únicamente su carro => sin carrera sobre los autos.
 //   - El controlador mantiene `simMutex` durante todo el tick (los manejadores
-//     de mensajes del cliente también lo toman), de modo que el vector no se
+//     HTTP de acciones también lo toman), de modo que el vector no se
 //     reasigna mientras los trabajadores usan índices estables.
+//
+// Transporte (variante sin websockets):
+//   - El cliente no mantiene una conexión abierta: consulta por polling HTTP.
+//     GET /state cada ~33 ms (un tick del juego) y POST /action para los
+//     eventos de juego. Esta rama cubre la opción "(evalúe una implementación
+//     sin websockets)" del enunciado.
+//   - Se descartó SSE (Server-Sent Events) porque conserva una conexión
+//     persistente bidireccional a medio camino y agrega lógica de stream;
+//     el polling deja al servidor sin estado de conexión: cada request es
+//     autocontenida y se responde con `Connection: close`.
+//   - GET /state devuelve world.stateJson() on-demand bajo simMutex: como el
+//     controlador mantiene ese mutex durante todo el tick, el cliente ve
+//     siempre un estado completo de antes o de después de un tick, nunca a
+//     medias (misma garantía atómica que difundía el websocket). Cuando el
+//     juego está detenido, el estado queda congelado (mismo tick y mismos
+//     autos), semántica sobre la que ya se apoyan las correcciones de
+//     reconciliación del cliente (restartPending / lastSeenTick).
+//   - POST /action reutiliza src/protocol.cpp (parseClientMessage) con los
+//     mismos JSON que inscribían los mensajes WS originales, por lo que la
+//     lógica del frontend (envíos "start/restart/game_over/removeCar/slowmo")
+//     no cambió.
 //
 // (Equivale al "Diseño 4: Hilo asíncrono para vehículos" del enunciado:
 //  grupo fijo de hilos que toman solicitudes desde una cola.)
@@ -30,8 +52,7 @@
 #define ASIO_STANDALONE
 #endif
 
-#include <websocketpp/config/asio_no_tls.hpp>
-#include <websocketpp/server.hpp>
+#include <asio.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -40,10 +61,10 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
+#include <cstdlib>
 #include <mutex>
 #include <queue>
-#include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,8 +73,6 @@
 #include "src/car.h"
 #include "src/protocol.h"
 #include "src/world.h"
-
-typedef websocketpp::server<websocketpp::config::asio> WsServer;
 
 static volatile std::sig_atomic_t g_running = 1;
 
@@ -66,25 +85,143 @@ struct MoveTask {
     std::size_t index;   // position in world.cars
     float mult;          // speed multiplier for this tick
 };
+
+// HTTP/1.1 connection helper on the main thread. Every polling request opens
+// a short-lived TCP connection: read the request, answer, close. Handles the
+// two game endpoints plus the CORS preflight; anything else returns 404.
+void handleRequest(asio::ip::tcp::socket &sock, World &world,
+                   std::mutex &simMutex) {
+    asio::error_code ec;
+    asio::streambuf buf;
+
+    const std::size_t headersEnd = asio::read_until(sock, buf, "\r\n\r\n", ec);
+    if (ec) {
+        return;
+    }
+
+    std::string head(
+        static_cast<const char *>(asio::buffer_cast<const void *>(buf.data())),
+        headersEnd);
+    buf.consume(headersEnd);
+
+    std::istringstream headStream(head);
+    std::string method, target, version;
+    headStream >> method >> target >> version;
+    if (method.empty() || target.empty()) {
+        return;
+    }
+
+    std::size_t contentLength = 0;
+    std::string line;
+    while (std::getline(headStream, line)) {
+        const std::size_t colon = line.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        std::string name = line.substr(0, colon);
+        std::string value = line.substr(colon + 1);
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() && value.back() == '\r') {
+            value.pop_back();
+        }
+        if (name == "Content-Length" || name == "content-length") {
+            contentLength =
+                static_cast<std::size_t>(std::strtoull(value.c_str(), nullptr, 10));
+        }
+    }
+
+    std::string body;
+    if (method == "POST" && contentLength > 0) {
+        // The body may already be buffered after the headers; finish reading
+        // only the missing bytes, then keep the first contentLength of them.
+        while (buf.size() < contentLength && !ec) {
+            asio::read(sock, buf, asio::transfer_at_least(1), ec);
+        }
+        const std::size_t take = std::min(buf.size(), contentLength);
+        body.assign(
+            static_cast<const char *>(asio::buffer_cast<const void *>(buf.data())),
+            take);
+        buf.consume(take);
+    }
+
+    const std::string cors = "Access-Control-Allow-Origin: *";
+    asio::streambuf out;
+    std::ostream os(&out);
+
+    if (method == "OPTIONS") {
+        // Preflight of the cross-origin POST /action from the game page.
+        os << "HTTP/1.1 200 OK\r\n"
+           << cors << "\r\n"
+           << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+           << "Access-Control-Allow-Headers: Content-Type\r\n"
+           << "Access-Control-Max-Age: 86400\r\n"
+           << "Content-Length: 0\r\n"
+           << "Connection: close\r\n\r\n";
+    } else if (method == "GET" && target == "/state") {
+        std::string state;
+        {
+            std::lock_guard<std::mutex> lock(simMutex);
+            state = world.stateJson();
+        }
+        os << "HTTP/1.1 200 OK\r\n"
+           << cors << "\r\n"
+           << "Content-Type: application/json\r\n"
+           << "Content-Length: " << state.size() << "\r\n"
+           << "Connection: close\r\n\r\n"
+           << state;
+    } else if (method == "POST" && target == "/action") {
+        ClientMessage cm = parseClientMessage(body);
+        {
+            std::lock_guard<std::mutex> lock(simMutex);
+            switch (cm.action) {
+                case ClientAction::Start:
+                case ClientAction::Restart:
+                    world.startGame();
+                    break;
+                case ClientAction::GameOver:
+                    world.stopGame();
+                    break;
+                case ClientAction::RemoveCar:
+                    world.removeCar(cm.carId);
+                    break;
+                case ClientAction::SlowmoOn:
+                    world.setSlowmo(true);
+                    break;
+                case ClientAction::SlowmoOff:
+                    world.setSlowmo(false);
+                    break;
+                case ClientAction::None:
+                default:
+                    break;
+            }
+        }
+        os << "HTTP/1.1 200 OK\r\n"
+           << cors << "\r\n"
+           << "Content-Type: application/json\r\n"
+           << "Content-Length: 2\r\n"
+           << "Connection: close\r\n\r\n"
+           << "{}";
+    } else {
+        os << "HTTP/1.1 404 Not Found\r\n"
+           << cors << "\r\n"
+           << "Content-Length: 0\r\n"
+           << "Connection: close\r\n\r\n";
+    }
+
+    asio::write(sock, out, ec);
 }
+}  // namespace
 
 int main() {
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
     World world(World::TICK_MS);
-    WsServer server;
-
-    server.clear_access_channels(websocketpp::log::alevel::all);
-    server.clear_error_channels(websocketpp::log::elevel::all);
-
-    server.init_asio();
-    server.set_reuse_addr(true);
 
     // Shared state between the network thread and the simulation threads.
-    std::mutex simMutex;                 // guards `world`
-    std::mutex outMutex;                 // guards `outbox`
-    std::queue<std::string> outbox;      // state snapshots ready to broadcast
+    std::mutex simMutex;  // guards `world` (controller + action handlers)
 
     // Worker pool plumbing.
     const std::size_t hardwareThreads =
@@ -101,51 +238,6 @@ int main() {
     std::mutex doneMutex;
     std::condition_variable doneCv;      // controller waits for a finished batch
     std::atomic<bool> workersStop{false};
-
-    // Active WebSocket connections (typically a single game client).
-    std::set<websocketpp::connection_hdl,
-             std::owner_less<websocketpp::connection_hdl>> connections;
-
-    server.set_open_handler([&server, &connections, &world](
-                                websocketpp::connection_hdl hdl) {
-        connections.insert(hdl);
-        server.send(hdl, world.helloJson(), websocketpp::frame::opcode::text);
-    });
-
-    server.set_close_handler([&connections](websocketpp::connection_hdl hdl) {
-        connections.erase(hdl);
-    });
-
-    // Client messages only touch the world through the simulation lock.
-    server.set_message_handler([&world, &simMutex](websocketpp::connection_hdl,
-                                                   WsServer::message_ptr msg) {
-        ClientMessage cm = parseClientMessage(msg->get_payload());
-        std::lock_guard<std::mutex> lock(simMutex);
-        switch (cm.action) {
-            case ClientAction::Start:
-            case ClientAction::Restart:
-                world.startGame();
-                break;
-            case ClientAction::GameOver:
-                world.stopGame();
-                break;
-            case ClientAction::RemoveCar:
-                world.removeCar(cm.carId);
-                break;
-            case ClientAction::SlowmoOn:
-                world.setSlowmo(true);
-                break;
-            case ClientAction::SlowmoOff:
-                world.setSlowmo(false);
-                break;
-            case ClientAction::None:
-            default:
-                break;
-        }
-    });
-
-    server.listen(5000);
-    server.start_accept();
 
     // Fixed worker pool: each thread loops forever waiting for tasks on the
     // shared queue. It executes the task (moving only its assigned car) and
@@ -188,14 +280,13 @@ int main() {
     // shared queue and waits for all of them before the cull phase. The
     // simulation lock is held for the whole tick, so the cars vector is
     // never resized while the workers use their indices.
-    std::thread controllerThread([&world, &simMutex, &outMutex, &outbox,
-                                  &taskQueue, &taskMutex, &taskCv,
-                                  &pendingTasks, &doneMutex, &doneCv]() {
+    std::thread controllerThread([&world, &simMutex, &taskQueue, &taskMutex,
+                                  &taskCv, &pendingTasks, &doneMutex,
+                                  &doneCv]() {
         auto nextWake = std::chrono::steady_clock::now();
         const float dt = static_cast<float>(World::TICK_MS);
 
         while (g_running) {
-            std::string snapshot;
             {
                 std::lock_guard<std::mutex> lock(simMutex);
                 if (world.running) {
@@ -223,11 +314,6 @@ int main() {
 
                     world.endTick();
                 }
-                snapshot = world.stateJson();
-            }
-            {
-                std::lock_guard<std::mutex> lock(outMutex);
-                outbox.push(std::move(snapshot));
             }
 
             nextWake += std::chrono::milliseconds(static_cast<long>(World::TICK_MS));
@@ -235,46 +321,25 @@ int main() {
         }
     });
 
-    // Broadcast dispatcher on the asio thread: drains one snapshot per timer
-    // callback and sends it to every connection.
-    std::function<void()> broadcastLoop;
-    broadcastLoop = [&]() {
-        std::string snapshot;
-        {
-            std::lock_guard<std::mutex> lock(outMutex);
-            if (!outbox.empty()) {
-                snapshot = std::move(outbox.front());
-                outbox.pop();
-            }
-        }
+    // Main thread: HTTP/1.1 accept loop. Every request is handled synchronously
+    // and answered with `Connection: close`, keeping the server stateless (no
+    // outbox, no broadcast): GET /state returns the freshest simulation
+    // snapshot and POST /action funnels the game events into parseClientMessage.
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor(
+        io, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 5000));
+    acceptor.set_option(asio::socket_base::reuse_address(true));
 
-        if (!snapshot.empty()) {
-            for (const auto &hdl : connections) {
-                try {
-                    server.send(hdl, snapshot, websocketpp::frame::opcode::text);
-                } catch (const websocketpp::exception &) {
-                    // Connection vanished mid-broadcast; the close handler
-                    // will drop it from the set.
-                }
-            }
+    while (g_running) {
+        asio::ip::tcp::socket sock(io);
+        asio::error_code ec;
+        acceptor.accept(sock, ec);
+        if (ec) {
+            continue;
         }
+        handleRequest(sock, world, simMutex);
+    }
 
-        if (g_running) {
-            server.set_timer(static_cast<long>(World::TICK_MS),
-                             [&broadcastLoop](websocketpp::lib::error_code const &ec) {
-                                 if (!ec) {
-                                     broadcastLoop();
-                                 }
-                             });
-        }
-    };
-    server.set_timer(1, [&broadcastLoop](websocketpp::lib::error_code const &ec) {
-        if (!ec) {
-            broadcastLoop();
-        }
-    });
-
-    server.run();
     controllerThread.join();
 
     // Shut the worker pool down cleanly.
