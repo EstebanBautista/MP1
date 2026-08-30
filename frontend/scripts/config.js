@@ -1,6 +1,11 @@
 // Game Configuration Constants
 
 const GameConfig = {
+  // Backend WebSocket endpoint (the server simulation is the authority)
+  // README targets ws://localhost:5000; derived from the page host so the
+  // client works from any machine that can reach the backend port.
+  WS_URL: `ws://${location.hostname}:5000`,
+
   // Display dimensions
   GAME_WIDTH: 640,
   GAME_HEIGHT: 840,

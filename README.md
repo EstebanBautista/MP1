@@ -45,7 +45,7 @@ Frontend:
 http://localhost:8080
 
 Backend:
-wss://localhost:5000
+ws://localhost:5000
 
 ## General Assignment Tasks
 
