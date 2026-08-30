@@ -1,72 +1,93 @@
-# Enemy Cars Threading Project
+# MP1 — Enemy Cars: Multi-threading and Shared-Memory Ideas
 
-## Overview
+MINIPROYECTO 1 · Programación Paralela (300CIP013) · 2026-II
 
-This is a micro project designed to teach parallel programming students how to use threads (std::thread or pthread) in a client-server architecture.
+Juego cliente-servidor donde el **backend en C++** genera y mueve vehículos
+enemigos usando 4 estrategias distintas de concurrencia (una por rama de este
+repositorio), y el **frontend en PixiJS** los renderiza en el navegador. El
+backend es la única fuente de verdad: el frontend solo dibuja lo que el
+servidor le manda.
 
-The objective is to implement a system where enemy cars are generated and their positions are updated asynchronously using threads. The backend server is responsible for generating movement data, while the frontend displays the enemy cars and applies the received positions.
+---
 
-The project focuses on the practical application of parallel programming concepts such as thread creation, task decomposition, synchronization, and communication between concurrent components.
+## Cómo está organizado este repositorio
 
-By completing this project, students will learn how to:
+Este repo NO tiene toda la implementación en `main`. Cada uno de los 4 diseños
+de concurrencia vive en su **propia rama**, completa y ejecutable de forma
+independiente:
 
-- Create and manage parallel execution using: C++ std::thread or POSIX pthread
-- Decompose a problem into independent tasks.
-- Design thread-based solutions for real-time simulations.
-- Manage shared data between threads.
+| Rama | Diseño | Resumen |
+|---|---|---|
+| [`main`](../../tree/main) | — | Scaffold original del profesor, sin implementar. No es evaluable, solo el punto de partida. |
+| [`design-1`](../../tree/design-1) | Hilos Independientes | Un `std::thread` por cada vehículo, creado y destruido en cada tick. |
+| [`design-2`](../../tree/design-2) | Hilo Único de Actualización | Un solo hilo mueve todos los vehículos, secuencialmente. |
+| [`design-3`](../../tree/design-3) | Hilo por Tipo de Vehículo | Un hilo fijo por cada uno de los 5 tipos/colores de auto. |
+| [`design-4`](../../tree/design-4) | Pool de Hilos + Cola de Tareas | Grupo fijo de workers que toman tareas de una cola compartida (productor-consumidor). **Única rama sin WebSocket** — usa HTTP polling. |
 
-## Technologies
+**Si estás evaluando este proyecto, andá directo a la rama del diseño que te
+interese** (`design-1`, `design-2`, `design-3` o `design-4`) — cada una es un
+proyecto autocontenido, no hace falta combinar nada de otra rama.
 
-Backend
-- C++
-- POSIX Threads (pthread) or C++ Threads (std::thread)
-- Socket Programming
-- Concurrent Programming Concepts
+---
 
-Frontend
-- JavaScript
-- HTML5 Canvas / PixiJS
+## Cómo correr cualquiera de los diseños
 
-Infrastructure
-- Docker
-- Docker Compose
-
-## Start the application
-
-Build and execute both services:
-
+1. Cloná el repo y pará en la rama que quieras probar:
 ```bash
-docker compose up --build
+   git clone https://github.com/EstebanBautista/MP1.git
+   cd MP1
+   git checkout design-2   # o design-1 / design-3 / design-4
 ```
 
-Services:
+2. Levantá los contenedores:
+```bash
+   docker compose up --build
+```
+   El `--build` es obligatorio la primera vez y cada vez que cambies de rama —
+   si no, Docker puede seguir usando una imagen vieja compilada de otro diseño.
 
-Frontend:
-http://localhost:8080
+3. Abrí el juego en el navegador:
+```
+   http://localhost:8080
+```
 
-Backend:
-wss://localhost:5000
+4. **Importante**: si venías de probar otra rama, hacé un **hard refresh**
+   (`Ctrl+Shift+R`) o abrí en **modo incógnito** — el navegador cachea los
+   archivos `.js` y puede mostrarte comportamiento de la rama anterior si no
+   lo forzás a recargar todo de cero.
 
-## General Assignment Tasks
+### Si vas a cambiar de rama para probar otro diseño
 
-Students must implement a parallel solution where enemy car movement is handled by threads.
+```bash
+docker compose down
+git checkout design-3
+docker compose up --build
+```
+Y de nuevo, hard refresh en el navegador después.
 
-The solution must:
+---
 
-- Create worker threads.
-- Assign movement tasks to threads.
-- Update enemy positions concurrently.
-- Send updated states to the frontend.
+## Arquitectura común a los 4 diseños
 
-More details in course assignment
+- **Backend** (`backend/`): C++, WebSocket (`websocketpp` + Asio standalone,
+  vendorizados en `backend/third_party/` para builds reproducibles sin
+  depender de internet), JSON (`nlohmann/json`).
+  - `server.cpp` — arranca el servidor y contiene la lógica de threading
+    **específica de cada diseño** (es el único archivo que cambia
+    sustancialmente entre ramas).
+  - `src/world.cpp` / `world.h` — estado del juego: vehículos, spawn,
+    dificultad, serialización a JSON. Compartido por los 4 diseños.
+  - `src/protocol.cpp` / `protocol.h` — traduce los mensajes JSON del cliente
+    (`start`, `restart`, `removeCar`, `slowmo`) a tipos de C++.
+  - `src/car.h` — estructura de datos de un vehículo.
 
-## Submision
+- **Frontend** (`frontend/`): PixiJS. Solo renderiza el estado que recibe del
+  backend y maneja la entrada del jugador (controles, colisiones visuales,
+  power-ups, puntaje). No calcula posiciones de enemigos por su cuenta.
 
-- Students must create a personal fork of the project repository.
-- Send PDF report with
-    - A short description of your implementation.
-    - The threading approach used.
-    - Any synchronization mechanisms implemented.
-    - Testing results.
+- **Transporte**: WebSocket en `design-1`, `design-2` y `design-3`. La rama
+  `design-4` usa HTTP polling en su lugar — ver el comentario de cabecera de
+  su `server.cpp` para el detalle de por qué.
 
-This project connects theoretical concepts from parallel programming with a practical simulation environment.
+---
+
