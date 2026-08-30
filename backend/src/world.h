@@ -62,9 +62,29 @@ struct World {
     void setSlowmo(bool on);
     void removeCar(std::uint64_t id);
 
-    // One simulation step. Every threading design ends up calling this
-    // (or its sub-steps) from one or more worker threads.
+    // One simulation step. In the single-threaded designs this is the whole
+    // tick; in the parallel movement designs the granular steps below are
+    // used instead so the server can dispatch car movement to workers.
     void update(double dtMs);
+
+    // ---- Granular steps for the threaded movement designs ----------------
+    // Controller phase (single thread, lock held): advance the clock and
+    // spawn a car when the release timer is due.
+    void beginTick(double dtMs);
+
+    // Worker phase: advance one car by its current speed times `mult` and
+    // mark it inactive once it leaves the screen. This reads no shared state
+    // besides the car itself, so distinct cars can be moved concurrently by
+    // different threads without locking.
+    void moveCar(Car &c, float mult);
+
+    // Controller phase (single thread, lock held): drop inactive cars and
+    // fold them into the difficulty counters (evaded / speed / spawn rate).
+    void endTick();
+
+    float slowmoMultiplier() const {
+        return slowmoActive ? static_cast<float>(SLOWMO_MULTIPLIER) : 1.0f;
+    }
 
     double tickMs() const { return tickRateMs; }
     std::string helloJson() const;
