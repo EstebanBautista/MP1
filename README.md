@@ -60,7 +60,11 @@ independiente:
 
 ```bash
 docker compose down
+```
+```bash
 git checkout design-3
+```
+```bash
 docker compose up --build
 ```
 Y de nuevo, hard refresh en el navegador después.
