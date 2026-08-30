@@ -20,7 +20,11 @@ el detalle de sincronización.
 
 ```bash
 git checkout design-1
-docker compose down   # si venías de otra rama
+```
+```bash
+docker compose down   # si viene de otra rama
+```
+```bash
 docker compose up --build
 ```
 Abrí `http://localhost:8080` — hard refresh (`Ctrl+Shift+R`) o modo incógnito
