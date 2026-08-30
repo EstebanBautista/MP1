@@ -533,8 +533,10 @@ window.onload = function () {
     GameWS.on('state', function (state) {
       if (restartPending) {
         // Ignore stale states from the previous game; accept the first one
-        // whose tick drops to or below the last tick of the previous session.
-        if (state.tick <= lastSeenTick) {
+        // whose tick drops below the last tick of the previous session.
+        // Strict '<' is required: after game over the backend keeps sending
+        // frozen states with the same tick, and those must be discarded too.
+        if (state.tick < lastSeenTick) {
           restartPending = false;
           lastServerState = state;
         }
@@ -853,8 +855,13 @@ window.onload = function () {
 
       enemyCars = [];
       enemyCarIndex.clear();
-      lastSeenTick = lastServerState ? lastServerState.tick : 0;
-      restartPending = lastSeenTick > 0;
+      // Keep the guard armed across a fast second restart: if we are already
+      // waiting for the new session, do not re-read lastServerState (it is
+      // null) and wipe lastSeenTick with 0.
+      if (!restartPending) {
+        lastSeenTick = lastServerState ? lastServerState.tick : 0;
+        restartPending = lastSeenTick > 0;
+      }
       pendingDeletionIds.clear();
       lastServerState = null;
       slowmoSentToServer = false;
