@@ -1,11 +1,11 @@
 # MP1 — Enemy Cars: Multi-threading and Shared-Memory Ideas
 
-MINIPROYECTO 1 · Programación Paralela (300CIP013) · 2026-II
+MINIPROYECTO 1
 
 Juego cliente-servidor donde el **backend en C++** genera y mueve vehículos
 enemigos usando 4 estrategias distintas de concurrencia (una por rama de este
 repositorio), y el **frontend en PixiJS** los renderiza en el navegador. El
-backend es la única fuente de verdad: el frontend solo dibuja lo que el
+backend es la única fuente de verdad, el frontend solo dibuja lo que el
 servidor le manda.
 
 ---
@@ -43,20 +43,19 @@ independiente:
 ```bash
    docker compose up --build
 ```
-   El `--build` es obligatorio la primera vez y cada vez que cambies de rama —
-   si no, Docker puede seguir usando una imagen vieja compilada de otro diseño.
+   El `--build` es obligatorio la primera vez y cada vez que se cambie de rama, si no, Docker puede seguir usando una imagen vieja compilada de otro diseño.
 
-3. Abrí el juego en el navegador:
+3. Abrir el juego en el navegador:
 ```
    http://localhost:8080
 ```
 
-4. **Importante**: si viene de probar otra rama, haga un **hard refresh**
-   (`Ctrl+Shift+R`) o abra en **modo incógnito** — el navegador cachea los
+4. **Importante**: si se viene de probar otra rama, se debe hacer un **hard refresh**
+   (`Ctrl+Shift+R`) o abrir en **modo incógnito**. El navegador cachea los
    archivos `.js` y puede mostrarle comportamiento de la rama anterior si no
    lo fuerza a recargar todo de cero.
 
-### Si vas a cambiar de rama para probar otro diseño
+### Si se va a cambiar de rama para probar otro diseño
 
 ```bash
 docker compose down
